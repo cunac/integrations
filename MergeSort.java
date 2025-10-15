@@ -57,7 +57,7 @@ public class MergeSort {
         int k = left;        // Index for merged array
 
         // Merge the two subarrays
-        while (i < mid && j <= right) {
+        while (i <= mid && j <= right) {
             if (temp[i] <= temp[j]) {
                 arr[k] = temp[i];
                 i++;
@@ -85,6 +85,9 @@ public class MergeSort {
      * @param arr the array to print
      */
     public static void printArray(int[] arr) {
+        if (arr == null) {
+            return;
+        }
         for (int value : arr) {
             System.out.print(value + " ");
         }
