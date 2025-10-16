@@ -30,15 +30,29 @@ jobs:
     - name: Make gradlew executable
       run: chmod +x gradlew
 
+    - name: Run tests
+      run: ./gradlew test --no-daemon --stacktrace
+
+    - name: Publish test report
+      if: always()
+      uses: dorny/test-reporter@v1
+      with:
+        name: Test Results
+        path: build/test-results/test/*.xml
+        reporter: java-junit
+        fail-on-error: true
+
     - name: Build with Gradle
       run: ./gradlew build --no-daemon --stacktrace
 
-    - name: Upload build artifacts
+    - name: Upload test and build artifacts
       if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: build-reports
-        path: build/reports/
+        name: test-and-build-reports
+        path: |
+          build/reports/
+          build/test-results/
         retention-days: 7
 
   dependency-submission:
