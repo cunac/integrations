@@ -93,7 +93,7 @@ jobs:
   trigger-autofix:
     if: failure()
     needs: [build]
-    uses: ./.github/workflows/autofix.yml
+    uses: ./.github/workflows/codex-autofix.yaml
     secrets: inherit
     with:
       failed_job: build

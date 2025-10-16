@@ -1,0 +1,103 @@
+name: Codex Auto-Fix on Failure (Java)
+
+on:
+  workflow_run:
+    workflows: ["Java CI with Gradle"]
+    types: [completed]
+  workflow_call:
+    inputs:
+      failed_job:
+        description: 'Name of the job that failed'
+        required: false
+        type: string
+      run_url:
+        description: 'URL of the failed workflow run'
+        required: false
+        type: string
+      branch:
+        description: 'Branch where the failure occurred'
+        required: false
+        type: string
+      sha:
+        description: 'Commit SHA where the failure occurred'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-fix:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event_name == 'workflow_call' }}
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      FAILED_WORKFLOW_NAME: ${{ github.event.workflow_run.name || inputs.failed_job }}
+      FAILED_RUN_URL: ${{ github.event.workflow_run.html_url || inputs.run_url }}
+      FAILED_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || inputs.branch }}
+      FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
+
+    steps:
+      - name: Check OpenAI API Key Set
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY secret is not set. Skipping auto-fix." >&2
+            exit 1
+          fi
+
+      - name: Checkout Failing Ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FAILED_HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Build & test before fix (to confirm failure)
+        run: |
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            ./gradlew test || true
+          elif [ -f "pom.xml" ]; then
+            mvn test -DskipITs=false || true
+          fi
+
+      - name: Run Codex Auto-Fix
+        uses: openai/codex-action@main
+        id: codex
+        with:
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: >-
+            You are an expert Java developer. Read this Maven/Gradle Java project,
+            analyze the recent CI test failures, and implement the minimal change needed
+            to make all tests pass. Do not refactor unrelated code. Keep the fix small,
+            local, and consistent with the project style. Assume tests use JUnit 5.
+          codex_args: '["--config","sandbox_mode=\"workspace-write\""]'
+
+      - name: Verify Tests After Fix
+        run: |
+          if [ -f "gradlew" ]; then
+            ./gradlew test
+          elif [ -f "pom.xml" ]; then
+            mvn test -DskipITs=false
+          fi
+
+      - name: Create pull request with fixes
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "fix(ci): auto-fix failing tests via Codex"
+          branch: codex/auto-fix-${{ github.event.workflow_run.run_id }}
+          base: ${{ env.FAILED_HEAD_BRANCH }}
+          title: "Auto-fix failing CI via Codex"
+          body: |
+            Codex automatically generated this PR in response to a CI failure on workflow `${{ env.FAILED_WORKFLOW_NAME }}`.
+            Failed run: ${{ env.FAILED_RUN_URL }}
+            Head branch: `${{ env.FAILED_HEAD_BRANCH }}`
+            This PR contains minimal Java changes intended solely to make the CI pass.
