@@ -5,22 +5,33 @@ on:
     # Trigger this job after any run of the primary CI workflow completes
     workflows: ["Java CI with Gradle"]
     types: [completed]
+  # Also allow manual triggering for testing
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Workflow run ID to fix'
+        required: false
+      branch:
+        description: 'Branch to fix'
+        required: false
+        default: 'test1'
 
 permissions:
   contents: write
   pull-requests: write
+  actions: read
 
 jobs:
   auto-fix:
-    # Only run when the referenced workflow concluded with a failure
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    # Run when workflow failed OR manually triggered
+    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      FAILED_WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
-      FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
-      FAILED_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-      FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      FAILED_WORKFLOW_NAME: ${{ github.event.workflow_run.name || 'Manual Trigger' }}
+      FAILED_RUN_URL: ${{ github.event.workflow_run.html_url || github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.inputs.run_id || github.run_id }}
+      FAILED_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || github.event.inputs.branch || github.ref_name }}
+      FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       - name: Check OpenAI API Key Set
         run: |
@@ -28,6 +39,14 @@ jobs:
             echo "OPENAI_API_KEY secret is not set. Skipping auto-fix." >&2
             exit 1
           fi
+
+      - name: Debug Info
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Workflow conclusion: ${{ github.event.workflow_run.conclusion }}"
+          echo "Branch: ${{ env.FAILED_HEAD_BRANCH }}"
+          echo "SHA: ${{ env.FAILED_HEAD_SHA }}"
+
       - name: Checkout Failing Ref
         uses: actions/checkout@v4
         with:
