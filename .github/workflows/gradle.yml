@@ -78,6 +78,9 @@ jobs:
     - name: Generate JaCoCo coverage report
       run: ./gradlew test jacocoTestReport --no-daemon --stacktrace
 
+    - name: Verify coverage thresholds
+      run: ./gradlew jacocoTestCoverageVerification --no-daemon
+
     - name: Add coverage to PR
       if: github.event_name == 'pull_request'
       uses: madrapps/jacoco-report@v1.6.1
@@ -88,6 +91,8 @@ jobs:
         min-coverage-changed-files: 70
         title: Code Coverage Report
         update-comment: true
+        pass-emoji: ':green_circle:'
+        fail-emoji: ':red_circle:'
 
     - name: Upload coverage report
       uses: actions/upload-artifact@v4
