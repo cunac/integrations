@@ -63,7 +63,7 @@ public class MergeSort {
                 i++;
             } else {
                 arr[k] = temp[j];
-                j--;
+                j++;
             }
             k++;
         }
@@ -71,7 +71,7 @@ public class MergeSort {
         // Copy remaining elements from left subarray
         while (i <= mid) {
             arr[k] = temp[i];
-            i;
+            i++;
             k++;
         }
 
