@@ -83,6 +83,53 @@ jobs:
         echo "Extracting failure details..."
         grep -A 10 "FAILED\|FAILURE\|Error" test-output.log > failures.txt || echo "No specific failures found in output"
 
+    - name: Collect coverage information
+      if: steps.check_key.outputs.has_key == 'true'
+      run: |
+        echo "Generating coverage report..."
+        ./gradlew jacocoTestReport jacocoTestCoverageVerification --no-daemon --stacktrace 2>&1 | tee coverage-output.log || true
+
+        # Extract coverage violations
+        echo "Extracting coverage violations..."
+        grep -A 5 "Rule violated\|Coverage\|COVEREDRATIO\|minimum" coverage-output.log > coverage-violations.txt || echo "No coverage violations found"
+
+        # Parse JaCoCo CSV for detailed coverage info
+        if [ -f "build/reports/jacoco/test/jacocoTestReport.csv" ]; then
+          echo "Coverage report found, extracting details..."
+          cat build/reports/jacoco/test/jacocoTestReport.csv > coverage-report.csv
+
+          # Calculate coverage percentages
+          echo "=== Coverage Summary ===" > coverage-summary.txt
+          awk -F',' 'NR>1 {
+            class=$3
+            inst_miss=$4
+            inst_cov=$5
+            branch_miss=$6
+            branch_cov=$7
+            line_miss=$8
+            line_cov=$9
+
+            if (inst_miss + inst_cov > 0) {
+              inst_pct = (inst_cov / (inst_miss + inst_cov)) * 100
+            } else {
+              inst_pct = 0
+            }
+
+            if (line_miss + line_cov > 0) {
+              line_pct = (line_cov / (line_miss + line_cov)) * 100
+            } else {
+              line_pct = 0
+            }
+
+            printf "%s: %.2f%% instruction coverage, %.2f%% line coverage (Lines: %d covered, %d missed)\n",
+              class, inst_pct, line_pct, line_cov, line_miss
+          }' build/reports/jacoco/test/jacocoTestReport.csv >> coverage-summary.txt
+
+          cat coverage-summary.txt
+        else
+          echo "No coverage report generated" > coverage-summary.txt
+        fi
+
     - name: Analyze code and generate fix with OpenAI
       if: steps.check_key.outputs.has_key == 'true'
       run: |
@@ -92,6 +139,21 @@ jobs:
         BUBBLE_SORT=$(cat src/main/java/BubbleSort.java)
         MERGE_SORT=$(cat src/main/java/MergeSort.java)
         FAILURES=$(cat failures.txt | head -50)
+        COVERAGE_SUMMARY=$(cat coverage-summary.txt 2>/dev/null || echo "No coverage summary available")
+        COVERAGE_VIOLATIONS=$(cat coverage-violations.txt 2>/dev/null || echo "No coverage violations detected")
+
+        # Read test files for coverage context
+        BUBBLE_SORT_TEST=$(cat src/test/java/BubbleSortTest.java 2>/dev/null || echo "No test file found")
+        MERGE_SORT_TEST=$(cat src/test/java/MergeSortTest.java 2>/dev/null || echo "No test file found")
+
+        # Escape special characters for JSON
+        BUBBLE_SORT_ESCAPED=$(echo "$BUBBLE_SORT" | jq -Rs .)
+        MERGE_SORT_ESCAPED=$(echo "$MERGE_SORT" | jq -Rs .)
+        FAILURES_ESCAPED=$(echo "$FAILURES" | jq -Rs .)
+        COVERAGE_SUMMARY_ESCAPED=$(echo "$COVERAGE_SUMMARY" | jq -Rs .)
+        COVERAGE_VIOLATIONS_ESCAPED=$(echo "$COVERAGE_VIOLATIONS" | jq -Rs .)
+        BUBBLE_SORT_TEST_ESCAPED=$(echo "$BUBBLE_SORT_TEST" | jq -Rs .)
+        MERGE_SORT_TEST_ESCAPED=$(echo "$MERGE_SORT_TEST" | jq -Rs .)
 
         # Create prompt for OpenAI
         cat > prompt.json <<EOF
@@ -100,15 +162,15 @@ jobs:
           "messages": [
             {
               "role": "system",
-              "content": "You are an expert Java developer. Analyze test failures and provide ONLY the corrected code. Output only valid Java code, no explanations."
+              "content": "You are an expert Java developer specializing in test-driven development and code coverage optimization. Analyze test failures and coverage gaps, then provide corrected code. For coverage issues, suggest additional tests or modifications to existing code to improve coverage. Output format: FILE: filename followed by the complete corrected code."
             },
             {
               "role": "user",
-              "content": "FAILED JOB: ${{ inputs.failed_job }}\n\nTest failures:\n${FAILURES}\n\nBubbleSort.java:\n${BUBBLE_SORT}\n\nMergeSort.java:\n${MERGE_SORT}\n\nProvide the corrected Java code for any failing class. Output format: FILE: filename.java followed by the complete corrected code."
+              "content": "FAILED JOB: ${{ inputs.failed_job }}\n\n=== TEST FAILURES ===\n${FAILURES}\n\n=== COVERAGE VIOLATIONS ===\n${COVERAGE_VIOLATIONS}\n\n=== COVERAGE SUMMARY ===\n${COVERAGE_SUMMARY}\n\n=== SOURCE FILES ===\n\nBubbleSort.java:\n${BUBBLE_SORT}\n\nMergeSort.java:\n${MERGE_SORT}\n\n=== TEST FILES ===\n\nBubbleSortTest.java:\n${BUBBLE_SORT_TEST}\n\nMergeSortTest.java:\n${MERGE_SORT_TEST}\n\n=== REQUIREMENTS ===\nMinimum 80% overall coverage required.\nMinimum 70% per-class line coverage required.\n\nIf there are test failures, fix the source code. If there are coverage violations, add test cases to existing test files to cover untested branches and lines. Provide complete corrected files using format: FILE: filename.java followed by the complete code."
             }
           ],
           "temperature": 0.3,
-          "max_tokens": 2000
+          "max_tokens": 4000
         }
         EOF
 
@@ -148,6 +210,33 @@ jobs:
           echo "Fix application would happen here with proper parsing"
         fi
 
+        if grep -q "FILE: BubbleSortTest.java" suggested-fix.txt; then
+          echo "BubbleSortTest fix detected, backing up original..."
+          cp src/test/java/BubbleSortTest.java src/test/java/BubbleSortTest.java.backup
+          echo "Test fix application would happen here with proper parsing"
+        fi
+
+        if grep -q "FILE: MergeSortTest.java" suggested-fix.txt; then
+          echo "MergeSortTest fix detected, backing up original..."
+          cp src/test/java/MergeSortTest.java src/test/java/MergeSortTest.java.backup
+          echo "Test fix application would happen here with proper parsing"
+        fi
+
+    - name: Verify fixes
+      if: steps.check_key.outputs.has_key == 'true'
+      run: |
+        echo "Re-running tests and coverage checks..."
+        ./gradlew clean test jacocoTestReport jacocoTestCoverageVerification --no-daemon --stacktrace 2>&1 | tee verify-output.log || true
+
+        # Check if fixes resolved the issues
+        if grep -q "BUILD SUCCESSFUL" verify-output.log; then
+          echo "✅ Fixes appear to have resolved the issues!"
+          echo "fix_successful=true" >> $GITHUB_OUTPUT
+        else
+          echo "⚠️ Issues may still persist after applying fixes"
+          echo "fix_successful=false" >> $GITHUB_OUTPUT
+        fi
+
     - name: Upload analysis artifacts
       if: always() && steps.check_key.outputs.has_key == 'true'
       uses: actions/upload-artifact@v4
@@ -156,6 +245,14 @@ jobs:
         path: |
           test-output.log
           failures.txt
+          coverage-output.log
+          coverage-violations.txt
+          coverage-summary.txt
+          coverage-report.csv
           openai-response.json
           suggested-fix.txt
+          verify-output.log
+          prompt.json
+          src/main/java/*.backup
+          src/test/java/*.backup
         retention-days: 7
