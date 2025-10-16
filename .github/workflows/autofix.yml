@@ -73,48 +73,89 @@ jobs:
       if: steps.check_key.outputs.has_key == 'true'
       run: chmod +x gradlew
 
-    - name: Run Codex Auto-Fix
-      if: steps.check_key.outputs.has_key == 'true'
-      uses: openai/codex-action@main
-      with:
-        openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-        prompt: >-
-          You are working in a Java project using Gradle with JUnit 5 tests and JaCoCo code coverage.
-          The project implements sorting algorithms (BubbleSort and MergeSort) with comprehensive parametrized tests.
-
-          FAILED JOB: ${{ inputs.failed_job }}
-          FAILED RUN: ${{ inputs.run_url || 'Manual trigger' }}
-
-          Run './gradlew test' to see what's failing. Identify the minimal change needed to make all tests pass
-          and meet coverage thresholds (80% overall, 70% per-class). Implement ONLY that change and stop.
-          Do not refactor unrelated code. Keep changes surgical and minimal.
-        codex_args: '["--config","sandbox_mode=\"workspace-write\""]'
-
-    - name: Verify Fix
+    - name: Collect failure information
       if: steps.check_key.outputs.has_key == 'true'
       run: |
-        echo "Running tests to verify fix..."
-        ./gradlew test jacocoTestCoverageVerification --no-daemon
+        echo "Collecting test failure information..."
+        ./gradlew test --no-daemon --stacktrace 2>&1 | tee test-output.log || true
 
-    - name: Create Auto-Fix PR
-      if: success() && steps.check_key.outputs.has_key == 'true'
-      uses: peter-evans/create-pull-request@v6
+        # Extract relevant error information
+        echo "Extracting failure details..."
+        grep -A 10 "FAILED\|FAILURE\|Error" test-output.log > failures.txt || echo "No specific failures found in output"
+
+    - name: Analyze code and generate fix with OpenAI
+      if: steps.check_key.outputs.has_key == 'true'
+      run: |
+        echo "Analyzing failures and generating fixes using OpenAI API..."
+
+        # Read source files
+        BUBBLE_SORT=$(cat src/main/java/BubbleSort.java)
+        MERGE_SORT=$(cat src/main/java/MergeSort.java)
+        FAILURES=$(cat failures.txt | head -50)
+
+        # Create prompt for OpenAI
+        cat > prompt.json <<EOF
+        {
+          "model": "gpt-4",
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are an expert Java developer. Analyze test failures and provide ONLY the corrected code. Output only valid Java code, no explanations."
+            },
+            {
+              "role": "user",
+              "content": "FAILED JOB: ${{ inputs.failed_job }}\n\nTest failures:\n${FAILURES}\n\nBubbleSort.java:\n${BUBBLE_SORT}\n\nMergeSort.java:\n${MERGE_SORT}\n\nProvide the corrected Java code for any failing class. Output format: FILE: filename.java followed by the complete corrected code."
+            }
+          ],
+          "temperature": 0.3,
+          "max_tokens": 2000
+        }
+        EOF
+
+        # Call OpenAI API
+        RESPONSE=$(curl -s https://api.openai.com/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $OPENAI_API_KEY" \
+          -d @prompt.json)
+
+        echo "$RESPONSE" > openai-response.json
+
+        # Extract the fix from response
+        FIX=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
+        echo "$FIX" > suggested-fix.txt
+
+        echo "OpenAI suggested fix:"
+        echo "$FIX"
+
+    - name: Apply suggested fixes
+      if: steps.check_key.outputs.has_key == 'true'
+      run: |
+        echo "Attempting to apply AI-suggested fixes..."
+
+        # Parse and apply fixes (this is a simplified version)
+        # In a real scenario, you'd parse the FILE: markers and extract code blocks
+
+        if grep -q "FILE: BubbleSort.java" suggested-fix.txt; then
+          echo "BubbleSort fix detected, backing up original..."
+          cp src/main/java/BubbleSort.java src/main/java/BubbleSort.java.backup
+          # Note: Actual parsing and application would need more sophisticated logic
+          echo "Fix application would happen here with proper parsing"
+        fi
+
+        if grep -q "FILE: MergeSort.java" suggested-fix.txt; then
+          echo "MergeSort fix detected, backing up original..."
+          cp src/main/java/MergeSort.java src/main/java/MergeSort.java.backup
+          echo "Fix application would happen here with proper parsing"
+        fi
+
+    - name: Upload analysis artifacts
+      if: always() && steps.check_key.outputs.has_key == 'true'
+      uses: actions/upload-artifact@v4
       with:
-        commit-message: "fix(ci): auto-fix failing ${{ inputs.failed_job }} via Codex"
-        branch: autofix/${{ github.run_id }}
-        base: ${{ inputs.branch || github.ref_name }}
-        title: "🤖 Auto-fix: ${{ inputs.failed_job }} Failure"
-        body: |
-          ## Auto-Fix Applied
-
-          This PR was automatically generated by Codex in response to a CI failure.
-
-          **Failed Job:** `${{ inputs.failed_job }}`
-          **Workflow Run:** ${{ inputs.run_url || 'Manual trigger' }}
-          **Branch:** `${{ inputs.branch || github.ref_name }}`
-          **Commit:** `${{ inputs.sha || github.sha }}`
-
-          This PR contains minimal changes intended solely to make the CI pass.
-          Please review carefully before merging.
-
-          🤖 Generated with Codex Auto-Fix
+        name: autofix-analysis-${{ github.run_id }}
+        path: |
+          test-output.log
+          failures.txt
+          openai-response.json
+          suggested-fix.txt
+        retention-days: 7
