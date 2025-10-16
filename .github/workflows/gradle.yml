@@ -90,17 +90,6 @@ jobs:
         files: build/reports/jacoco/test/jacocoTestReport.xml
         fail_ci_if_error: false
 
-  trigger-autofix:
-    if: failure()
-    needs: [build]
-    uses: ./.github/workflows/codex-autofix.yaml
-    secrets: inherit
-    with:
-      failed_job: build
-      run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      branch: ${{ github.head_ref || github.ref_name }}
-      sha: ${{ github.sha }}
-
   dependency-submission:
     runs-on: ubuntu-latest
     permissions:
