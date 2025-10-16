@@ -70,30 +70,40 @@ Coverage thresholds:
 
 ## CI/CD
 
-GitHub Actions workflow (`.github/workflows/gradle.yml`) runs on:
-- Push to `main` branch
-- Pull requests to `main` branch
+### Main CI Workflow (`.github/workflows/gradle.yml`)
 
-The CI pipeline includes three jobs:
+Runs on push to `main` and pull requests to `main`.
 
-**Build job** (runs on all pushes and PRs):
+**Build job**:
 1. Validates Gradle wrapper integrity
-2. Sets up JDK 17 (temurin distribution) with Gradle caching
-3. Makes gradlew executable
-4. Runs tests with `./gradlew test`
-5. Publishes test reports using dorny/test-reporter
-6. Runs full build with `./gradlew build`
-7. Uploads test and build reports as artifacts on failure
+2. Sets up JDK 17 with Gradle caching
+3. Runs: `./gradlew build test jacocoTestReport jacocoTestCoverageVerification`
+4. Publishes test reports with dorny/test-reporter
+5. Adds coverage report to PR comments (madrapps/jacoco-report)
+6. Uploads artifacts: build reports (on failure), coverage HTML (always)
+7. Generates coverage badges and uploads to Codecov
 
-**Code coverage job** (runs after build job):
-1. Generates JaCoCo coverage report
-2. Uploads HTML coverage report as artifact (30-day retention)
-3. Generates coverage badges using cicirello/jacoco-badge-generator
-4. Uploads coverage to Codecov
+**Trigger-autofix job** (runs if build fails):
+- Calls the autofix workflow with failure details
+- Passes failed job name, run URL, branch, and SHA
 
 **Dependency submission job** (runs only on pushes to main):
-1. Generates and submits dependency graph for Dependabot alerts
-2. Requires `contents: write` permission
+- Generates and submits dependency graph for Dependabot alerts
+
+### Auto-Fix Workflow (`.github/workflows/autofix.yml`)
+
+Separate workflow triggered by CI failures or manually via workflow_dispatch.
+
+**Auto-fix job**:
+1. Checks for OPENAI_API_KEY secret (gracefully skips if not set)
+2. Checks out code at the failing commit
+3. Uses OpenAI Codex to analyze failures and generate fixes
+4. Verifies fix by running tests and coverage checks
+5. Creates PR with automatic fixes to the failing branch
+
+**Triggers:**
+- Called by CI workflow when build job fails
+- Manual dispatch via GitHub Actions UI
 
 ## Gradle Configuration
 
