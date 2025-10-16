@@ -72,13 +72,14 @@ jobs:
         uses: openai/codex-action@main
         id: codex
         with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt: >-
             You are an expert Java developer. Read this Maven/Gradle Java project,
             analyze the recent CI test failures, and implement the minimal change needed
             to make all tests pass. Do not refactor unrelated code. Keep the fix small,
             local, and consistent with the project style. Assume tests use JUnit 5.
-          codex_args: '["--config","sandbox_mode=\"workspace-write\""]'
+          sandbox: workspace-write
+          codex-args: '--model gpt-4'
 
       - name: Verify Tests After Fix
         run: |
