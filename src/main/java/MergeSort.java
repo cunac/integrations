@@ -23,7 +23,7 @@ public class MergeSort {
      * @param right right index of the subarray
      */
     private static void mergeSort(int[] arr, int[] temp, int left, int right) {
-        if (left <= right) {
+        if (left < right) {
             int mid = left + (right - left) / 2;
 
             // Sort left half
