@@ -34,6 +34,8 @@ jobs:
 
     - name: Build, test, and verify coverage
       run: ./gradlew build test jacocoTestReport jacocoTestCoverageVerification --no-daemon --stacktrace
+    - name: verify coverage
+      run: ./gradlew jacocoTestReport jacocoTestCoverageVerification --no-daemon --stacktrace
 
     - name: Publish test report
       if: always()

@@ -6,6 +6,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 @DisplayName("MergeSort Tests")
@@ -142,6 +143,56 @@ class MergeSortTest {
                         new int[]{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
                         "larger reverse sorted array"
                 )
+        );
+    }
+
+    @org.junit.jupiter.api.Test
+    @DisplayName("Should print array contents with trailing space and newline")
+    void shouldPrintArrayContents() {
+        int[] input = {3, 1, 2};
+        java.io.PrintStream originalOut = System.out;
+        java.io.ByteArrayOutputStream outputStream = new java.io.ByteArrayOutputStream();
+        System.setOut(new java.io.PrintStream(outputStream));
+        try {
+            MergeSort.printArray(input);
+        } finally {
+            System.setOut(originalOut);
+        }
+
+        assertEquals("3 1 2 \n", outputStream.toString());
+    }
+
+    @org.junit.jupiter.api.Test
+    @DisplayName("Should handle null input in printArray without output")
+    void shouldHandleNullPrintArray() {
+        java.io.PrintStream originalOut = System.out;
+        java.io.ByteArrayOutputStream outputStream = new java.io.ByteArrayOutputStream();
+        System.setOut(new java.io.PrintStream(outputStream));
+        try {
+            MergeSort.printArray(null);
+        } finally {
+            System.setOut(originalOut);
+        }
+
+        assertEquals("", outputStream.toString());
+    }
+
+    @org.junit.jupiter.api.Test
+    @DisplayName("Main method should demonstrate sorting output")
+    void mainShouldDemonstrateSorting() {
+        java.io.PrintStream originalOut = System.out;
+        java.io.ByteArrayOutputStream outputStream = new java.io.ByteArrayOutputStream();
+        System.setOut(new java.io.PrintStream(outputStream));
+        try {
+            MergeSort.main(new String[0]);
+        } finally {
+            System.setOut(originalOut);
+        }
+
+        String output = outputStream.toString();
+        org.junit.jupiter.api.Assertions.assertTrue(
+                output.contains("Original array:") && output.contains("Sorted array:"),
+                () -> "Unexpected main output: " + output
         );
     }
 }
