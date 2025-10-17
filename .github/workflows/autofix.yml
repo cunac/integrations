@@ -168,9 +168,7 @@ jobs:
               "role": "user",
               "content": "FAILED JOB: ${{ inputs.failed_job }}\n\n=== TEST FAILURES ===\n${FAILURES}\n\n=== COVERAGE VIOLATIONS ===\n${COVERAGE_VIOLATIONS}\n\n=== COVERAGE SUMMARY ===\n${COVERAGE_SUMMARY}\n\n=== SOURCE FILES ===\n\nBubbleSort.java:\n${BUBBLE_SORT}\n\nMergeSort.java:\n${MERGE_SORT}\n\n=== TEST FILES ===\n\nBubbleSortTest.java:\n${BUBBLE_SORT_TEST}\n\nMergeSortTest.java:\n${MERGE_SORT_TEST}\n\n=== REQUIREMENTS ===\nMinimum 80% overall coverage required.\nMinimum 70% per-class line coverage required.\n\nIf there are test failures, fix the source code. If there are coverage violations, add test cases to existing test files to cover untested branches and lines. Provide complete corrected files using format: FILE: filename.java followed by the complete code."
             }
-          ],
-          "temperature": 0.3,
-          "max_tokens": 4000
+          ]
         }
         EOF
 
