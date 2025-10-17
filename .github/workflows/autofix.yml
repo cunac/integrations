@@ -19,6 +19,11 @@ on:
         description: 'Commit SHA where the failure occurred'
         required: true
         type: string
+      openai_model:
+        description: 'OpenAI model to use for analysis'
+        required: false
+        type: string
+        default: 'gpt-4-turbo'
   workflow_dispatch:
     inputs:
       failed_job:
@@ -29,6 +34,11 @@ on:
         description: 'Branch to fix'
         required: true
         default: 'main'
+      openai_model:
+        description: 'OpenAI model to use'
+        required: false
+        type: string
+        default: 'gpt-4-turbo'
 
 permissions:
   contents: write
@@ -39,6 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ inputs.openai_model || 'gpt-4-turbo' }}
 
     steps:
     - name: Check OpenAI API Key
@@ -73,106 +84,256 @@ jobs:
       if: steps.check_key.outputs.has_key == 'true'
       run: chmod +x gradlew
 
-    - name: Collect failure information
+    - name: Detect base branch
+      if: steps.check_key.outputs.has_key == 'true'
+      id: detect_base
+      run: |
+        # Try to detect the base branch (usually main or master)
+        if git show-ref --verify --quiet refs/remotes/origin/main; then
+          BASE_BRANCH="origin/main"
+        elif git show-ref --verify --quiet refs/remotes/origin/master; then
+          BASE_BRANCH="origin/master"
+        else
+          # Fallback to the current branch's parent
+          BASE_BRANCH="HEAD^"
+        fi
+        echo "base_branch=$BASE_BRANCH" >> $GITHUB_OUTPUT
+        echo "📍 Using base branch: $BASE_BRANCH"
+
+    - name: Collect git diff and changed files
       if: steps.check_key.outputs.has_key == 'true'
       run: |
-        echo "Collecting test failure information..."
+        echo "=== Collecting git diff from base branch ==="
+        BASE_BRANCH="${{ steps.detect_base.outputs.base_branch }}"
+
+        # Get list of changed files
+        git diff --name-only $BASE_BRANCH HEAD > changed-files.txt
+        echo "Changed files:"
+        cat changed-files.txt
+
+        # Get full diff with context
+        git diff $BASE_BRANCH HEAD > full-diff.patch
+        echo "Full diff saved to full-diff.patch"
+
+        # Get diff for each changed file with more context
+        mkdir -p file-diffs
+        while IFS= read -r file; do
+          if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            git diff -U10 $BASE_BRANCH HEAD -- "$file" > "file-diffs/${filename}.diff"
+          fi
+        done < changed-files.txt
+
+    - name: Run tests and collect failures
+      if: steps.check_key.outputs.has_key == 'true'
+      run: |
+        echo "=== Running tests to identify failures ==="
         ./gradlew test --no-daemon --stacktrace 2>&1 | tee test-output.log || true
 
-        # Extract relevant error information
-        echo "Extracting failure details..."
-        grep -A 10 "FAILED\|FAILURE\|Error" test-output.log > failures.txt || echo "No specific failures found in output"
+        # Extract test failures with context
+        echo "=== Extracting failure details ==="
+        grep -B 5 -A 15 "FAILED\|FAILURE\|Error\|Exception" test-output.log > failures.txt || echo "No test failures detected"
 
-    - name: Collect coverage information
+        # Parse JUnit XML for structured failure info
+        if [ -d "build/test-results/test" ]; then
+          echo "=== Parsing JUnit test results ==="
+          find build/test-results/test -name "*.xml" -exec grep -l "failure\|error" {} \; > failed-test-files.txt || true
+
+          # Extract failure messages from XML
+          if [ -s failed-test-files.txt ]; then
+            echo "=== Test Failure Summary ===" > test-failure-summary.txt
+            while IFS= read -r xmlfile; do
+              # Extract test name and failure message
+              grep -A 5 "failure\|error" "$xmlfile" | head -20 >> test-failure-summary.txt || true
+            done < failed-test-files.txt
+          fi
+        fi
+
+    - name: Generate coverage report and identify gaps
       if: steps.check_key.outputs.has_key == 'true'
       run: |
-        echo "Generating coverage report..."
-        ./gradlew jacocoTestReport jacocoTestCoverageVerification --no-daemon --stacktrace 2>&1 | tee coverage-output.log || true
+        echo "=== Generating coverage report ==="
+        ./gradlew jacocoTestReport --no-daemon --stacktrace 2>&1 | tee coverage-output.log || true
+
+        echo "=== Running coverage verification ==="
+        ./gradlew jacocoTestCoverageVerification --no-daemon --stacktrace 2>&1 | tee -a coverage-output.log || true
 
         # Extract coverage violations
-        echo "Extracting coverage violations..."
-        grep -A 5 "Rule violated\|Coverage\|COVEREDRATIO\|minimum" coverage-output.log > coverage-violations.txt || echo "No coverage violations found"
+        grep -B 3 -A 5 "Rule violated\|Coverage\|COVEREDRATIO\|minimum" coverage-output.log > coverage-violations.txt || echo "No coverage violations found"
 
-        # Parse JaCoCo CSV for detailed coverage info
+        # Parse JaCoCo CSV for detailed per-file coverage
         if [ -f "build/reports/jacoco/test/jacocoTestReport.csv" ]; then
-          echo "Coverage report found, extracting details..."
-          cat build/reports/jacoco/test/jacocoTestReport.csv > coverage-report.csv
+          echo "=== Analyzing coverage for changed files ==="
+          echo "=== Coverage Analysis for Changed Files ===" > coverage-gaps.txt
 
-          # Calculate coverage percentages
-          echo "=== Coverage Summary ===" > coverage-summary.txt
+          # Read changed files and match with coverage report
+          while IFS= read -r changed_file; do
+            # Extract class name from file path (e.g., src/main/java/BubbleSort.java -> BubbleSort)
+            if [[ "$changed_file" == *.java ]] && [[ "$changed_file" == src/main/* ]]; then
+              classname=$(basename "$changed_file" .java)
+
+              # Find coverage info for this class
+              grep ",$classname," build/reports/jacoco/test/jacocoTestReport.csv > temp_cov.txt || true
+
+              if [ -s temp_cov.txt ]; then
+                echo "" >> coverage-gaps.txt
+                echo "File: $changed_file" >> coverage-gaps.txt
+
+                # Parse coverage metrics
+                awk -F',' '{
+                  inst_miss=$4; inst_cov=$5
+                  branch_miss=$6; branch_cov=$7
+                  line_miss=$8; line_cov=$9
+
+                  inst_total = inst_miss + inst_cov
+                  line_total = line_miss + line_cov
+                  branch_total = branch_miss + branch_cov
+
+                  if (inst_total > 0) {
+                    inst_pct = (inst_cov / inst_total) * 100
+                  } else { inst_pct = 0 }
+
+                  if (line_total > 0) {
+                    line_pct = (line_cov / line_total) * 100
+                  } else { line_pct = 0 }
+
+                  if (branch_total > 0) {
+                    branch_pct = (branch_cov / branch_total) * 100
+                  } else { branch_pct = 0 }
+
+                  printf "  Line Coverage: %.1f%% (%d/%d lines covered)\n", line_pct, line_cov, line_total
+                  printf "  Branch Coverage: %.1f%% (%d/%d branches covered)\n", branch_pct, branch_cov, branch_total
+                  printf "  Instruction Coverage: %.1f%% (%d/%d instructions covered)\n", inst_pct, inst_cov, inst_total
+
+                  # Highlight gaps
+                  if (line_pct < 70) {
+                    printf "  ⚠️ COVERAGE GAP: Missing %.1f%% line coverage (need 70%% minimum)\n", 70 - line_pct
+                  }
+                  if (branch_miss > 0) {
+                    printf "  ⚠️ UNTESTED BRANCHES: %d branches not covered\n", branch_miss
+                  }
+                }' temp_cov.txt >> coverage-gaps.txt
+
+                rm temp_cov.txt
+              fi
+            fi
+          done < changed-files.txt
+
+          echo ""
+          echo "Coverage gaps for changed files:"
+          cat coverage-gaps.txt
+        fi
+
+        # Generate overall coverage summary
+        if [ -f "build/reports/jacoco/test/jacocoTestReport.csv" ]; then
+          echo "=== Overall Coverage Summary ===" > coverage-summary.txt
           awk -F',' 'NR>1 {
             class=$3
-            inst_miss=$4
-            inst_cov=$5
-            branch_miss=$6
-            branch_cov=$7
-            line_miss=$8
-            line_cov=$9
+            inst_miss=$4; inst_cov=$5
+            line_miss=$8; line_cov=$9
 
             if (inst_miss + inst_cov > 0) {
               inst_pct = (inst_cov / (inst_miss + inst_cov)) * 100
-            } else {
-              inst_pct = 0
-            }
+            } else { inst_pct = 0 }
 
             if (line_miss + line_cov > 0) {
               line_pct = (line_cov / (line_miss + line_cov)) * 100
-            } else {
-              line_pct = 0
-            }
+            } else { line_pct = 0 }
 
-            printf "%s: %.2f%% instruction coverage, %.2f%% line coverage (Lines: %d covered, %d missed)\n",
+            printf "%s: %.1f%% instruction, %.1f%% line (Lines: %d covered, %d missed)\n",
               class, inst_pct, line_pct, line_cov, line_miss
           }' build/reports/jacoco/test/jacocoTestReport.csv >> coverage-summary.txt
-
-          cat coverage-summary.txt
-        else
-          echo "No coverage report generated" > coverage-summary.txt
         fi
 
-    - name: Analyze code and generate fix with OpenAI
+    - name: Analyze with OpenAI and generate fixes
       if: steps.check_key.outputs.has_key == 'true'
       run: |
-        echo "Analyzing failures and generating fixes using OpenAI API..."
+        echo "=== Preparing context for AI analysis ==="
 
-        # Read source files
-        BUBBLE_SORT=$(cat src/main/java/BubbleSort.java)
-        MERGE_SORT=$(cat src/main/java/MergeSort.java)
-        FAILURES=$(cat failures.txt | head -50)
-        COVERAGE_SUMMARY=$(cat coverage-summary.txt 2>/dev/null || echo "No coverage summary available")
-        COVERAGE_VIOLATIONS=$(cat coverage-violations.txt 2>/dev/null || echo "No coverage violations detected")
+        # Read git diff
+        GIT_DIFF=$(cat full-diff.patch | head -500)
+
+        # Read changed files content
+        CHANGED_FILES_CONTENT=""
+        while IFS= read -r file; do
+          if [ -f "$file" ]; then
+            CHANGED_FILES_CONTENT="${CHANGED_FILES_CONTENT}\n\n=== FILE: $file ===\n"
+            CHANGED_FILES_CONTENT="${CHANGED_FILES_CONTENT}$(cat "$file")"
+          fi
+        done < changed-files.txt
+
+        # Read test failures
+        TEST_FAILURES=$(cat failures.txt 2>/dev/null || echo "No test failures")
+        TEST_FAILURE_SUMMARY=$(cat test-failure-summary.txt 2>/dev/null || echo "No detailed test failure summary")
+
+        # Read coverage information
+        COVERAGE_GAPS=$(cat coverage-gaps.txt 2>/dev/null || echo "No coverage gap analysis available")
+        COVERAGE_VIOLATIONS=$(cat coverage-violations.txt 2>/dev/null || echo "No coverage violations")
+        COVERAGE_SUMMARY=$(cat coverage-summary.txt 2>/dev/null || echo "No coverage summary")
 
         # Read test files for coverage context
-        BUBBLE_SORT_TEST=$(cat src/test/java/BubbleSortTest.java 2>/dev/null || echo "No test file found")
-        MERGE_SORT_TEST=$(cat src/test/java/MergeSortTest.java 2>/dev/null || echo "No test file found")
+        TEST_FILES_CONTENT=""
+        while IFS= read -r file; do
+          if [[ "$file" == src/test/* ]] && [ -f "$file" ]; then
+            TEST_FILES_CONTENT="${TEST_FILES_CONTENT}\n\n=== TEST FILE: $file ===\n"
+            TEST_FILES_CONTENT="${TEST_FILES_CONTENT}$(cat "$file")"
+          fi
+        done < changed-files.txt
 
-        # Escape special characters for JSON
-        BUBBLE_SORT_ESCAPED=$(echo "$BUBBLE_SORT" | jq -Rs .)
-        MERGE_SORT_ESCAPED=$(echo "$MERGE_SORT" | jq -Rs .)
-        FAILURES_ESCAPED=$(echo "$FAILURES" | jq -Rs .)
-        COVERAGE_SUMMARY_ESCAPED=$(echo "$COVERAGE_SUMMARY" | jq -Rs .)
-        COVERAGE_VIOLATIONS_ESCAPED=$(echo "$COVERAGE_VIOLATIONS" | jq -Rs .)
-        BUBBLE_SORT_TEST_ESCAPED=$(echo "$BUBBLE_SORT_TEST" | jq -Rs .)
-        MERGE_SORT_TEST_ESCAPED=$(echo "$MERGE_SORT_TEST" | jq -Rs .)
+        # If no test files in changed files, include all test files
+        if [ -z "$TEST_FILES_CONTENT" ]; then
+          for testfile in src/test/java/*.java; do
+            if [ -f "$testfile" ]; then
+              TEST_FILES_CONTENT="${TEST_FILES_CONTENT}\n\n=== TEST FILE: $testfile ===\n"
+              TEST_FILES_CONTENT="${TEST_FILES_CONTENT}$(cat "$testfile")"
+            fi
+          done
+        fi
 
-        # Create prompt for OpenAI
-        cat > prompt.json <<EOF
-        {
-          "model": "gpt-5",
-          "messages": [
-            {
-              "role": "system",
-              "content": "You are an expert Java developer specializing in test-driven development and code coverage optimization. Analyze test failures and coverage gaps, then provide corrected code. For coverage issues, suggest additional tests or modifications to existing code to improve coverage. Output format: FILE: filename followed by the complete corrected code."
-            },
-            {
-              "role": "user",
-              "content": "FAILED JOB: ${{ inputs.failed_job }}\n\n=== TEST FAILURES ===\n${FAILURES}\n\n=== COVERAGE VIOLATIONS ===\n${COVERAGE_VIOLATIONS}\n\n=== COVERAGE SUMMARY ===\n${COVERAGE_SUMMARY}\n\n=== SOURCE FILES ===\n\nBubbleSort.java:\n${BUBBLE_SORT}\n\nMergeSort.java:\n${MERGE_SORT}\n\n=== TEST FILES ===\n\nBubbleSortTest.java:\n${BUBBLE_SORT_TEST}\n\nMergeSortTest.java:\n${MERGE_SORT_TEST}\n\n=== REQUIREMENTS ===\nMinimum 80% overall coverage required.\nMinimum 70% per-class line coverage required.\n\nIf there are test failures, fix the source code. If there are coverage violations, add test cases to existing test files to cover untested branches and lines. Provide complete corrected files using format: FILE: filename.java followed by the complete code."
-            }
-          ]
-        }
-        EOF
+        echo "=== Creating AI prompt ==="
 
-        # Call OpenAI API
+        # Build the user content first
+        USER_CONTENT="=== FAILED JOB ===\n${{ inputs.failed_job }}\n"
+        USER_CONTENT="${USER_CONTENT}\n=== GIT DIFF (Changes that triggered failure) ===\n${GIT_DIFF}\n"
+        USER_CONTENT="${USER_CONTENT}\n=== TEST FAILURES ===\n${TEST_FAILURES}\n"
+        USER_CONTENT="${USER_CONTENT}\n${TEST_FAILURE_SUMMARY}\n"
+        USER_CONTENT="${USER_CONTENT}\n=== COVERAGE GAPS IN CHANGED FILES ===\n${COVERAGE_GAPS}\n"
+        USER_CONTENT="${USER_CONTENT}\n=== COVERAGE VIOLATIONS ===\n${COVERAGE_VIOLATIONS}\n"
+        USER_CONTENT="${USER_CONTENT}\n=== OVERALL COVERAGE SUMMARY ===\n${COVERAGE_SUMMARY}\n"
+        USER_CONTENT="${USER_CONTENT}\n=== CHANGED SOURCE FILES ===\n${CHANGED_FILES_CONTENT}\n"
+        USER_CONTENT="${USER_CONTENT}\n=== TEST FILES ===\n${TEST_FILES_CONTENT}\n"
+        USER_CONTENT="${USER_CONTENT}\n\n=== YOUR TASK ===\n"
+        USER_CONTENT="${USER_CONTENT}1. If there are TEST FAILURES: Find and fix the logical bugs in the source code\n"
+        USER_CONTENT="${USER_CONTENT}2. If there are COVERAGE GAPS: Add test cases to cover untested branches and edge cases\n"
+        USER_CONTENT="${USER_CONTENT}3. Focus ONLY on files shown in the git diff\n"
+        USER_CONTENT="${USER_CONTENT}4. Provide COMPLETE file contents in the specified format\n"
+        USER_CONTENT="${USER_CONTENT}\nREQUIREMENTS:\n- Minimum 80% overall coverage\n- Minimum 70% per-class line coverage\n- All tests must pass\n- Fix logical bugs before addressing coverage"
+
+        # Build system prompt
+        SYSTEM_PROMPT="You are an expert software engineer specializing in:\n1. LOGICAL BUG DETECTION: Identify off-by-one errors, incorrect conditionals, edge case handling, null pointer issues, and algorithmic flaws\n2. CODE COVERAGE OPTIMIZATION: Analyze untested code paths, missing branch coverage, and edge cases that need test coverage\n3. TEST-DRIVEN DEVELOPMENT: Write comprehensive test cases that cover all branches and edge cases\n\nYour task: Analyze the git diff and coverage gaps, then provide COMPLETE corrected files.\n\nOUTPUT FORMAT (strict):\n\`\`\`\nFILE: relative/path/to/file.java\n[complete file contents]\n\`\`\`\n\nRules:\n- Fix logical bugs in source code first\n- For coverage gaps, add test cases to test files\n- Always output COMPLETE file contents, not diffs\n- Focus on changed code from git diff\n- Explain your reasoning briefly before each file"
+
+        # Build JSON using jq to ensure proper escaping
+        jq -n \
+          --arg model "$OPENAI_MODEL" \
+          --arg system_prompt "$SYSTEM_PROMPT" \
+          --arg user_content "$USER_CONTENT" \
+          '{
+            "model": $model,
+            "temperature": 0.3,
+            "max_tokens": 4000,
+            "messages": [
+              {
+                "role": "system",
+                "content": $system_prompt
+              },
+              {
+                "role": "user",
+                "content": $user_content
+              }
+            ]
+          }' > prompt.json
+
+        echo "=== Calling OpenAI API ==="
         RESPONSE=$(curl -s https://api.openai.com/v1/chat/completions \
           -H "Content-Type: application/json" \
           -H "Authorization: Bearer $OPENAI_API_KEY" \
@@ -180,60 +341,218 @@ jobs:
 
         echo "$RESPONSE" > openai-response.json
 
-        # Extract the fix from response
-        FIX=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
-        echo "$FIX" > suggested-fix.txt
+        # Extract AI response
+        AI_FIX=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "No response"')
+        echo "$AI_FIX" > ai-suggested-fixes.txt
 
-        echo "OpenAI suggested fix:"
-        echo "$FIX"
+        echo "=== OpenAI Analysis Complete ==="
+        echo "$AI_FIX" | head -100
 
-    - name: Apply suggested fixes
+    - name: Parse and apply AI-suggested fixes
       if: steps.check_key.outputs.has_key == 'true'
       run: |
-        echo "Attempting to apply AI-suggested fixes..."
+        echo "=== Parsing AI-suggested fixes ==="
 
-        # Parse and apply fixes (this is a simplified version)
-        # In a real scenario, you'd parse the FILE: markers and extract code blocks
+        # Backup all potentially modified files
+        mkdir -p backups
+        while IFS= read -r file; do
+          if [ -f "$file" ]; then
+            cp "$file" "backups/$(basename "$file").backup"
+          fi
+        done < changed-files.txt
 
-        if grep -q "FILE: BubbleSort.java" suggested-fix.txt; then
-          echo "BubbleSort fix detected, backing up original..."
-          cp src/main/java/BubbleSort.java src/main/java/BubbleSort.java.backup
-          # Note: Actual parsing and application would need more sophisticated logic
-          echo "Fix application would happen here with proper parsing"
-        fi
+        # Also backup test files
+        for testfile in src/test/java/*.java; do
+          if [ -f "$testfile" ]; then
+            cp "$testfile" "backups/$(basename "$testfile").backup"
+          fi
+        done
 
-        if grep -q "FILE: MergeSort.java" suggested-fix.txt; then
-          echo "MergeSort fix detected, backing up original..."
-          cp src/main/java/MergeSort.java src/main/java/MergeSort.java.backup
-          echo "Fix application would happen here with proper parsing"
-        fi
+        # Parse and apply fixes using awk
+        echo "=== Applying fixes ==="
+        awk '
+          BEGIN {
+            in_file = 0
+            current_file = ""
+            content = ""
+          }
 
-        if grep -q "FILE: BubbleSortTest.java" suggested-fix.txt; then
-          echo "BubbleSortTest fix detected, backing up original..."
-          cp src/test/java/BubbleSortTest.java src/test/java/BubbleSortTest.java.backup
-          echo "Test fix application would happen here with proper parsing"
-        fi
+          # Detect file marker (various formats)
+          /^FILE: / || /^```FILE: / || /^### FILE: / {
+            # Save previous file if any
+            if (in_file && current_file != "" && content != "") {
+              output_file = current_file
+              # Remove any leading/trailing whitespace from content
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", content)
+              print content > output_file
+              close(output_file)
+              printf "✅ Applied fix to: %s\n", output_file
+            }
 
-        if grep -q "FILE: MergeSortTest.java" suggested-fix.txt; then
-          echo "MergeSortTest fix detected, backing up original..."
-          cp src/test/java/MergeSortTest.java src/test/java/MergeSortTest.java.backup
-          echo "Test fix application would happen here with proper parsing"
-        fi
+            # Extract new filename
+            match($0, /FILE: ([^ \n`]+)/, arr)
+            current_file = arr[1]
+            content = ""
+            in_file = 1
+            next
+          }
+
+          # Skip markdown code fence markers
+          /^```[a-z]*$/ && in_file {
+            next
+          }
+
+          # Collect file content
+          in_file {
+            if (content != "") {
+              content = content "\n" $0
+            } else {
+              content = $0
+            }
+          }
+
+          END {
+            # Save last file
+            if (in_file && current_file != "" && content != "") {
+              output_file = current_file
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", content)
+              print content > output_file
+              close(output_file)
+              printf "✅ Applied fix to: %s\n", output_file
+            }
+          }
+        ' ai-suggested-fixes.txt
+
+        echo "=== Fix application complete ==="
 
     - name: Verify fixes
       if: steps.check_key.outputs.has_key == 'true'
+      id: verify
       run: |
-        echo "Re-running tests and coverage checks..."
+        echo "=== Verifying fixes with full test suite ==="
         ./gradlew clean test jacocoTestReport jacocoTestCoverageVerification --no-daemon --stacktrace 2>&1 | tee verify-output.log || true
 
         # Check if fixes resolved the issues
         if grep -q "BUILD SUCCESSFUL" verify-output.log; then
-          echo "✅ Fixes appear to have resolved the issues!"
+          echo "✅ All tests passed and coverage requirements met!"
           echo "fix_successful=true" >> $GITHUB_OUTPUT
+
+          # Extract new coverage metrics
+          if [ -f "build/reports/jacoco/test/jacocoTestReport.csv" ]; then
+            echo "=== New Coverage Metrics ===" > coverage-after.txt
+            awk -F',' 'NR>1 {
+              class=$3; line_miss=$8; line_cov=$9
+              if (line_miss + line_cov > 0) {
+                line_pct = (line_cov / (line_miss + line_cov)) * 100
+                printf "%s: %.1f%%\n", class, line_pct
+              }
+            }' build/reports/jacoco/test/jacocoTestReport.csv >> coverage-after.txt
+            cat coverage-after.txt
+          fi
         else
-          echo "⚠️ Issues may still persist after applying fixes"
+          echo "⚠️ Issues persist after applying fixes"
           echo "fix_successful=false" >> $GITHUB_OUTPUT
+
+          # Rollback if fixes made things worse
+          echo "Rolling back changes..."
+          for backup in backups/*.backup; do
+            if [ -f "$backup" ]; then
+              original=$(basename "$backup" .backup)
+              # Try to find original file location
+              find src -name "$original" -exec cp "$backup" {} \;
+            fi
+          done
         fi
+
+    - name: Create Pull Request with fixes
+      if: steps.check_key.outputs.has_key == 'true' && steps.verify.outputs.fix_successful == 'true'
+      run: |
+        echo "=== Creating Pull Request ==="
+
+        # Configure git
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Create a new branch for the fix
+        FIX_BRANCH="autofix/fix-${{ inputs.failed_job }}-$(date +%s)"
+        git checkout -b "$FIX_BRANCH"
+
+        # Add all changes
+        git add -A
+
+        # Check if there are changes to commit
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+
+        # Create commit
+        cat > commit_message.txt <<'COMMIT_EOF'
+fix: Auto-fix for ${{ inputs.failed_job }} failure
+
+This PR was automatically generated by the autofix workflow to address:
+- Test failures and logical bugs
+- Code coverage gaps
+
+Changes focus on git diff from the failing commit.
+
+Generated by: ${{ inputs.run_url || github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+COMMIT_EOF
+
+        git commit -F commit_message.txt
+
+        # Push the branch
+        git push origin "$FIX_BRANCH"
+
+        # Create PR description
+        cat > pr_body.txt <<'PR_EOF'
+## Auto-Fix Summary
+
+This PR automatically fixes issues detected in the `${{ inputs.failed_job }}` job.
+
+### Analysis Focus
+- **Logical Bugs**: Off-by-one errors, incorrect conditionals, edge cases
+- **Coverage Gaps**: Untested branches and missing test cases
+- **Git Diff**: Only files changed in the failing commit
+
+### Coverage Improvements
+COVERAGE_IMPROVEMENTS_PLACEHOLDER
+
+### Failed Workflow
+${{ inputs.run_url || 'Manual trigger' }}
+
+### AI Model Used
+`${{ env.OPENAI_MODEL }}`
+
+---
+🤖 Generated by autofix workflow
+PR_EOF
+
+        # Add coverage comparison if available
+        if [ -f coverage-after.txt ] && [ -f coverage-summary.txt ]; then
+          echo "#### Before:" >> coverage_comparison.txt
+          cat coverage-summary.txt >> coverage_comparison.txt
+          echo "" >> coverage_comparison.txt
+          echo "#### After:" >> coverage_comparison.txt
+          cat coverage-after.txt >> coverage_comparison.txt
+
+          # Replace placeholder
+          COVERAGE_COMP=$(cat coverage_comparison.txt)
+          echo "$COVERAGE_COMP" | sed -i "s/COVERAGE_IMPROVEMENTS_PLACEHOLDER/\`\`\`\n$(cat coverage_comparison.txt)\n\`\`\`/" pr_body.txt || true
+        fi
+
+        # Create the PR using GitHub CLI
+        gh pr create \
+          --title "🤖 Auto-fix: ${{ inputs.failed_job }}" \
+          --body-file pr_body.txt \
+          --base "${{ inputs.branch }}" \
+          --head "$FIX_BRANCH" \
+          --label "autofix" \
+          --label "automated-pr"
+
+        echo "✅ Pull request created successfully"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Upload analysis artifacts
       if: always() && steps.check_key.outputs.has_key == 'true'
@@ -241,16 +560,20 @@ jobs:
       with:
         name: autofix-analysis-${{ github.run_id }}
         path: |
+          changed-files.txt
+          full-diff.patch
+          file-diffs/
           test-output.log
           failures.txt
+          test-failure-summary.txt
           coverage-output.log
           coverage-violations.txt
+          coverage-gaps.txt
           coverage-summary.txt
-          coverage-report.csv
-          openai-response.json
-          suggested-fix.txt
-          verify-output.log
+          coverage-after.txt
           prompt.json
-          src/main/java/*.backup
-          src/test/java/*.backup
-        retention-days: 7
+          openai-response.json
+          ai-suggested-fixes.txt
+          verify-output.log
+          backups/
+        retention-days: 14
