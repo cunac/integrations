@@ -26,7 +26,7 @@ public class QuickSort {
 
             // Sort elements before and after partition
             quickSort(arr, low, pivotIndex - 1);
-            quickSort(arr, pivotIndex + 2, high);
+            quickSort(arr, pivotIndex + 1, high);
         }
     }
 
