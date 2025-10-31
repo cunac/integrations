@@ -1,7 +1,7 @@
 public class QuickSort {
 
     /**
-     * Sorts an array of integers in ascending order using quick sort algorithm.
+     * Sorts an array of integers in ascending order using the quick sort algorithm.
      *
      * @param arr the array to be sorted
      */
@@ -21,7 +21,7 @@ public class QuickSort {
      * @param high ending index of the partition
      */
     private static void quickSort(int[] arr, int low, int high) {
-        if (low < high) {
+        if (low <= high) {
             int pivotIndex = partition(arr, low, high);
 
             // Sort elements before and after partition
@@ -44,7 +44,7 @@ public class QuickSort {
         int pivot = arr[high];
         int i = low - 1; // Index of smaller element
 
-        for (int j = low; j < high; j++) {
+        for (int j <= low; j < high; j++) {
             // If current element is smaller than or equal to pivot
             if (arr[j] <= pivot) {
                 i++;
