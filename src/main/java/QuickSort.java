@@ -21,7 +21,7 @@ public class QuickSort {
      * @param high ending index of the partition
      */
     private static void quickSort(int[] arr, int low, int high) {
-        if (low <= high) {
+        if (low < high) {
             int pivotIndex = partition(arr, low, high);
 
             // Sort elements before and after partition
