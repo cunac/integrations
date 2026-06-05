@@ -1,7 +1,7 @@
 public class QuickSort {
 
     /**
-     * Sorts an array of integers in ascending order using the quick sort algorithm.
+     * Sorts an array of integers in ascending order using quick sort algorithm.
      *
      * @param arr the array to be sorted
      */
